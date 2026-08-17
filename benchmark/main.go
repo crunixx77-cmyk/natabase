@@ -5,67 +5,89 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/valyala/fasthttp"
 )
 
 const (
-	BaseURL  = "http://localhost:8080"
-	AdminUsr = "admin"
-	AdminPwd = "admin123"
+	BaseURL    = "http://localhost:8080"
+	AdminUsr   = "admin"
+	AdminPwd   = "admin123"
+	KeySpace   = 100000 // Total 100.000 unique keys
+	ZipfTheta = 0.8    // Parameter kemiringan distribusi Zipf (80/20 rule)
 )
 
 var (
 	client = &fasthttp.Client{
-		MaxConnsPerHost: 50000,
-		ReadTimeout:     10 * time.Second,
-		WriteTimeout:    10 * time.Second,
+		MaxConnsPerHost: 100000,
+		ReadTimeout:     15 * time.Second,
+		WriteTimeout:    15 * time.Second,
 	}
 	jwtToken string
+	zipfGen  *rand.Zipf
 )
 
-// Struktur untuk menyimpan hasil metrik
 type TestResult struct {
-	Name        string
-	TotalReqs   int
-	Success     int
-	Failed      int
-	Duration    time.Duration
-	TPS         float64
-	Latencies   []float64
+	Name      string
+	TotalReqs int
+	Success   int
+	Failed    int
+	Duration  time.Duration
+	TPS       float64
+	Histogram *hdrhistogram.Histogram
 }
 
 func main() {
+	// Inisialisasi Zipf Generator untuk simulasi Hot Keys (80/20 Rule)
+	src := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(src)
+	zipfGen = rand.NewZipf(r, 1.1, 1.0, KeySpace-1)
+
 	fmt.Println("==================================================")
-	fmt.Println("🚀 NATABASE V5.0 ULTRA-BENCHMARK SUITE")
+	fmt.Println("🚀 NATABASE V5.0 ADVANCED BENCHMARK SUITE")
 	fmt.Println("==================================================")
 
-	// 1. Dapatkan Token JWT
+	// 1. Autentikasi JWT
 	authenticate()
 
-	// 2. Ambil Metrik Server Awal
+	// 2. Metrik Awal Server
 	fmt.Println("\n📊 [METRIK AWAL SERVER]")
 	printServerMetrics()
 
-	// 3. Uji Kemampuan Bertahap (Step-up Stress Test)
-	fmt.Println("\n🔥 [PHASE 1] Basic KV PUT/GET - Low Concurrency (100 Workers)")
-	res1 := runLoadTest("Phase 1 (100x1000)", 100, 1000, "kv")
-	printReport(res1)
+	// 3. WARM-UP PHASE (Pemanasan Connection Pool & JIT Optimization)
+	fmt.Println("\n☕ [PHASE 0] Warm-Up Phase (10.000 Requests)")
+	res0 := runLoadTest("Phase 0 (Warm-up)", 50, 200, "kv_uniform")
+	printReport(res0)
 
-	fmt.Println("\n🔥 [PHASE 2] Basic KV PUT/GET - High Concurrency (1000 Workers)")
-	res2 := runLoadTest("Phase 2 (1000x1000)", 1000, 1000, "kv")
+	// 4. DATA SEEDING PHASE (Mengisi 50.000 data awal agar GET tidak 404)
+	fmt.Println("\n🌱 [PHASE 1] Data Seeding Phase (Populating 50.000 Keys)")
+	seedData(50000)
+
+	// 5. ZIPFIAN DISTRIBUTED KV TEST (Mengecek efisiensi cache & lock contention)
+	fmt.Println("\n🔥 [PHASE 2] Realistic KV Traffic (Zipfian 80/20 Hot Keys - 500 Workers)")
+	res2 := runLoadTest("Phase 2 (Zipfian KV)", 500, 2000, "kv_zipfian")
 	printReport(res2)
 
-	fmt.Println("\n🔥 [PHASE 3] Batch Operations - Extreme Payload")
-	res3 := runLoadTest("Phase 3 (Batch Inserts)", 50, 100, "batch")
-	printReport(res3)
+	// 6. READ AFTER WRITE / INTEGRITY TEST (Validasi konsistensi data)
+	fmt.Println("\n🧪 [PHASE 3] Read-After-Write Consistency Verification")
+	verifyReadAfterWrite(1000)
 
-	// 4. Ambil Metrik Server Akhir untuk mengecek memory leak / AOF Size
-	fmt.Println("\n📊 [METRIK AKHIR SERVER (Batas Performa)]")
+	// 7. HIGH CONCURRENCY STRESS TEST (Beban Lebih Berat: 2.000 Workers)
+	fmt.Println("\n💥 [PHASE 4] Extreme Stress Test (2.000 Concurrency x 1.000 Reqs)")
+	res4 := runLoadTest("Phase 4 (Extreme Load)", 2000, 1000, "kv_zipfian")
+	printReport(res4)
+
+	// 8. EXTREME BATCH INSERTS (Beban Payload Berat)
+	fmt.Println("\n📦 [PHASE 5] Heavy Batch Operations (200 Workers x 100 Batch Reqs)")
+	res5 := runLoadTest("Phase 5 (Heavy Batch)", 200, 100, "batch")
+	printReport(res5)
+
+	// 9. Metrik Akhir Server
+	fmt.Println("\n📊 [METRIK AKHIR SERVER]")
 	printServerMetrics()
 }
 
@@ -97,14 +119,80 @@ func authenticate() {
 	}
 }
 
+func seedData(totalKeys int) {
+	var wg sync.WaitGroup
+	workers := 100
+	keysPerWorker := totalKeys / workers
+	start := time.Now()
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			req := fasthttp.AcquireRequest()
+			res := fasthttp.AcquireResponse()
+			defer fasthttp.ReleaseRequest(req)
+ defer fasthttp.ReleaseResponse(res)
+
+			for j := 0; j < keysPerWorker; j++ {
+				keyID := workerID*keysPerWorker + j
+				req.Header.Set("Authorization", jwtToken)
+				req.Header.Set("X-Stress-Test", "true")
+				req.SetRequestURI(fmt.Sprintf("%s/api/v1/data?key=bench_key_%d", BaseURL, keyID))
+				req.Header.SetMethod("POST")
+				req.SetBodyString(`{"data": "seeded_initial_value_for_testing"}`)
+				_ = client.Do(req, res)
+			}
+		}(i)
+	}
+	wg.Wait()
+	fmt.Printf("✅ Seeding selesai. %d keys ditambahkan dalam %v\n", totalKeys, time.Since(start))
+}
+
+func verifyReadAfterWrite(samples int) {
+	successCount := 0
+	req := fasthttp.AcquireRequest()
+	res := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(res)
+
+	for i := 0; i < samples; i++ {
+		key := fmt.Sprintf("raw_key_%d", i)
+		val := fmt.Sprintf("value_payload_%d_%d", i, rand.Intn(99999))
+
+		// 1. Write
+		req.Header.Set("Authorization", jwtToken)
+		req.Header.Set("X-Stress-Test", "true")
+		req.SetRequestURI(BaseURL + "/api/v1/data?key=" + key)
+		req.Header.SetMethod("POST")
+		req.SetBodyString(fmt.Sprintf(`{"data": "%s"}`, val))
+		_ = client.Do(req, res)
+
+		// 2. Immediate Read
+		req.Header.SetMethod("GET")
+		if err := client.Do(req, res); err == nil && res.StatusCode() == 200 {
+			var resp map[string]interface{}
+			if err := json.Unmarshal(res.Body(), &resp); err == nil {
+				if resp["data"] == val {
+					successCount++
+				}
+			}
+		}
+	}
+	fmt.Printf("✅ Verification Complete: %d/%d data konsisten (Read-after-Write Rate: %.2f%%)\n",
+		successCount, samples, float64(successCount)/float64(samples)*100)
+}
+
 func runLoadTest(name string, concurrency int, reqsPerWorker int, mode string) TestResult {
 	var wg sync.WaitGroup
 	var success, failed atomic.Int32
-	
-	latencies := make(chan float64, concurrency*reqsPerWorker)
-	
+
+	// HDR Histogram: Mengukur latensi 1 mikrodetik hingga 1 menit tanpa membengkakkan memori
+	hist := hdrhistogram.New(1, 60000000, 3) 
+	var histLock sync.Mutex
+
 	start := time.Now()
-	
+
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -114,33 +202,49 @@ func runLoadTest(name string, concurrency int, reqsPerWorker int, mode string) T
 			defer fasthttp.ReleaseRequest(req)
 			defer fasthttp.ReleaseResponse(res)
 
+			localHist := hdrhistogram.New(1, 60000000, 3)
+
 			for j := 0; j < reqsPerWorker; j++ {
 				req.Header.Set("Authorization", jwtToken)
-				req.Header.Set("X-Stress-Test", "true") // Bypass Rate Limiter (Sesuai kode asli)
+				req.Header.Set("X-Stress-Test", "true")
 
 				var isSuccess bool
 				reqStart := time.Now()
 
-				if mode == "kv" {
-					// Random operasi: 30% PUT, 70% GET
-					key := fmt.Sprintf("bench_key_%d_%d", workerID, rand.Intn(10000))
+				switch mode {
+				case "kv_uniform":
+					key := fmt.Sprintf("bench_key_%d", rand.Intn(KeySpace))
 					req.SetRequestURI(BaseURL + "/api/v1/data?key=" + key)
-					
 					if rand.Intn(100) < 30 {
 						req.Header.SetMethod("POST")
-						req.SetBodyString(`{"data": "tes_performa_tinggi_1234567890"}`)
+						req.SetBodyString(`{"data": "uniform_payload_value"}`)
 					} else {
 						req.Header.SetMethod("GET")
 					}
-				} else if mode == "batch" {
+				case "kv_zipfian":
+					keyID := zipfGen.Uint64()
+					key := fmt.Sprintf("bench_key_%d", keyID)
+					req.SetRequestURI(BaseURL + "/api/v1/data?key=" + key)
+					if rand.Intn(100) < 20 { // 20% Write, 80% Read (Real-world OLTP workload)
+						req.Header.SetMethod("POST")
+						req.SetBodyString(`{"data": "zipfian_payload_heavy_data"}`)
+					} else {
+						req.Header.SetMethod("GET")
+					}
+				case "batch":
 					req.SetRequestURI(BaseURL + "/api/v1/batch")
 					req.Header.SetMethod("POST")
-					req.SetBodyString(fmt.Sprintf(`{"batch_key_%d_1":"val1", "batch_key_%d_2":"val2", "batch_key_%d_3":"val3"}`, workerID, workerID, workerID))
+					req.SetBodyString(fmt.Sprintf(`{
+						"b_key_%d_1":"val1_extreme_heavy_payload_string",
+						"b_key_%d_2":"val2_extreme_heavy_payload_string",
+						"b_key_%d_3":"val3_extreme_heavy_payload_string",
+						"b_key_%d_4":"val4_extreme_heavy_payload_string"
+					}`, workerID, workerID, workerID, workerID))
 				}
 
 				if err := client.Do(req, res); err == nil {
 					status := res.StatusCode()
-					if status == 200 || status == 201 || status == 404 { // 404 wajar jika GET key yg belum ada
+					if status == 200 || status == 201 || status == 404 {
 						success.Add(1)
 						isSuccess = true
 					} else {
@@ -151,20 +255,19 @@ func runLoadTest(name string, concurrency int, reqsPerWorker int, mode string) T
 				}
 
 				if isSuccess {
-					latencies <- time.Since(reqStart).Seconds() * 1000 // dalam ms
+					latMicros := time.Since(reqStart).Microseconds()
+					_ = localHist.RecordValue(latMicros)
 				}
 			}
+
+			histLock.Lock()
+			hist.Merge(localHist)
+			histLock.Unlock()
 		}(i)
 	}
 
 	wg.Wait()
-	close(latencies)
 	duration := time.Since(start)
-
-	var latArr []float64
-	for l := range latencies {
-		latArr = append(latArr, l)
-	}
 
 	return TestResult{
 		Name:      name,
@@ -173,7 +276,7 @@ func runLoadTest(name string, concurrency int, reqsPerWorker int, mode string) T
 		Failed:    int(failed.Load()),
 		Duration:  duration,
 		TPS:       float64(success.Load()) / duration.Seconds(),
-		Latencies: latArr,
+		Histogram: hist,
 	}
 }
 
@@ -185,12 +288,11 @@ func printReport(res TestResult) {
 	fmt.Printf("Durasi         : %v\n", res.Duration)
 	fmt.Printf("Throughput     : %.2f TPS (Trans/sec)\n", res.TPS)
 
-	if len(res.Latencies) > 0 {
-		sort.Float64s(res.Latencies)
-		p50 := res.Latencies[len(res.Latencies)/2]
-		p90 := res.Latencies[int(float64(len(res.Latencies))*0.90)]
-		p99 := res.Latencies[int(float64(len(res.Latencies))*0.99)]
-		
+	if res.Histogram.TotalCount() > 0 {
+		p50 := float64(res.Histogram.ValueAtQuantile(50.0)) / 1000.0
+		p90 := float64(res.Histogram.ValueAtQuantile(90.0)) / 1000.0
+		p99 := float64(res.Histogram.ValueAtQuantile(99.0)) / 1000.0
+
 		fmt.Printf("Latensi p50    : %.2f ms\n", p50)
 		fmt.Printf("Latensi p90    : %.2f ms\n", p90)
 		fmt.Printf("Latensi p99    : %.2f ms\n", p99)

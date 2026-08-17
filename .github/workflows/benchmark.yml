@@ -31,6 +31,7 @@ jobs:
           cd benchmark
           go mod init benchmark || true
           go get github.com/valyala/fasthttp
+          go get github.com/HdrHistogram/hdrhistogram-go
           go mod tidy
           cd ..
 
