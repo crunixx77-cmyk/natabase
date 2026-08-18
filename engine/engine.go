@@ -654,3 +654,81 @@ func readBytes(r io.Reader) ([]byte, error) {
 	_, err := io.ReadFull(r, b)
 	return b, err
 }
+
+// ============================================================================
+// 6. GLOBAL ENDPOINTS (For easy access from main.go)
+// ============================================================================
+
+var (
+	GlobalDataStore   = NewAdvancedDataStore()
+	GlobalBroker      = NewPubSubBroker()
+	GlobalSnapshotter *RDBSnapshotter
+)
+
+func InitGlobalSnapshotter(filePath string) {
+	GlobalSnapshotter = NewRDBSnapshotter(filePath, GlobalDataStore)
+}
+
+// --- Global Hash Operations ---
+func HSet(key, field string, value []byte) {
+	GlobalDataStore.HSet(key, field, value)
+}
+
+func HGet(key, field string) ([]byte, bool) {
+	return GlobalDataStore.HGet(key, field)
+}
+
+// --- Global List Operations ---
+func LPush(key string, value []byte) {
+	GlobalDataStore.LPush(key, value)
+}
+
+func RPop(key string) ([]byte, bool) {
+	return GlobalDataStore.RPop(key)
+}
+
+// --- Global Set Operations ---
+func SAdd(key, member string) bool {
+	return GlobalDataStore.SAdd(key, member)
+}
+
+func SMembers(key string) []string {
+	return GlobalDataStore.SMembers(key)
+}
+
+// --- Global Sorted Set (ZSet) Operations ---
+func ZAdd(key string, score float64, member string) {
+	GlobalDataStore.ZAdd(key, score, member)
+}
+
+func ZRange(key string, start, stop int) []string {
+	return GlobalDataStore.ZRange(key, start, stop)
+}
+
+// --- Global Pub/Sub Operations ---
+func Subscribe(channel string) chan PubSubMessage {
+	return GlobalBroker.Subscribe(channel)
+}
+
+func Unsubscribe(channel string, ch chan PubSubMessage) {
+	GlobalBroker.Unsubscribe(channel, ch)
+}
+
+func Publish(channel string, payload []byte) int {
+	return GlobalBroker.Publish(channel, payload)
+}
+
+// --- Global RDBSnapshotter Operations ---
+func SaveRDB() error {
+	if GlobalSnapshotter == nil {
+		return errors.New("global snapshotter not initialized")
+	}
+	return GlobalSnapshotter.SaveRDB()
+}
+
+func LoadRDB() error {
+	if GlobalSnapshotter == nil {
+		return errors.New("global snapshotter not initialized")
+	}
+	return GlobalSnapshotter.LoadRDB()
+}

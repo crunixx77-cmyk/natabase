@@ -8,8 +8,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  benchmark-job:
-    name: Run Benchmark Suite
+  # =========================================================
+  # JOB 1: Internal Engine Stress Test & Race Detector
+  # =========================================================
+  engine-stress-test:
+    name: ⚡ Internal Engine Stress Test (-race)
     runs-on: ubuntu-latest
 
     steps:
@@ -26,8 +29,38 @@ jobs:
           go mod init natabase || true
           go mod tidy
 
-      - name: Prepare Benchmark Module
+      - name: Run Engine Stress & Memory Leak Diagnostic (-race)
         run: |
+          # Jalankan pengujian dengan race detector dan simpan log ke file
+          go run -race stress.go | tee engine_stress_report.log
+
+      - name: Upload Engine Stress Test Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-stress-report
+          path: engine_stress_report.log
+
+  # =========================================================
+  # JOB 2: External HTTP API Load Benchmark
+  # =========================================================
+  api-benchmark-test:
+    name: 🌐 External API Load Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Prepare Root & Benchmark Modules
+        run: |
+          go mod init natabase || true
+          go mod tidy
           cd benchmark
           go mod init benchmark || true
           go get github.com/valyala/fasthttp
@@ -35,12 +68,22 @@ jobs:
           go mod tidy
           cd ..
 
-      - name: Start Natabase Server
+      - name: Start Natabase API Server Background
         run: |
-          go run main.go &
+          go run main.go > server.log 2>&1 &
           sleep 10
 
-      - name: Run Benchmark Suite
+      - name: Run External API Benchmark Suite
         run: |
           cd benchmark
-          go run .
+          go run . | tee ../api_benchmark_report.log
+          cd ..
+
+      - name: Upload API Benchmark Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-benchmark-report
+          path: |
+            api_benchmark_report.log
+            server.log
