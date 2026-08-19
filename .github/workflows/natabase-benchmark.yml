@@ -1,0 +1,102 @@
+name: Natabase Ultra Benchmark & Audit
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  # Definisi variabel global agar versi Go konsisten di seluruh job
+  GO_VERSION: '1.22'
+
+jobs:
+  # =========================================================
+  # JOB 1: Core Engine Massive Scale Audit & Race Detector
+  # =========================================================
+  engine-audit-test:
+    name: ⚡ Massive Engine Audit (-race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # Mencegah runner menggantung (hanging) selamanya jika terjadi deadlock
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true # Mengaktifkan Go module caching bawaan untuk mempercepat build CI
+
+      - name: 📦 Prepare Root Go Module
+        run: |
+          # Penanganan init yang lebih aman (tidak error jika go.mod sudah ada)
+          if [ ! -f go.mod ]; then go mod init natabase; fi
+          go mod tidy
+
+      - name: 🚀 Run Massive Scale Audit & Race Detector
+        run: |
+          # Menjalankan script pengujian baru dengan race detector
+          go run -race massive_audit_test.go | tee engine_audit_report.log
+
+      - name: 📤 Upload Audit Artifacts (Report & CPU Profile)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-audit-artifacts
+          path: |
+            engine_audit_report.log
+            cpu_audit.prof
+          retention-days: 7 # Membersihkan file artefak otomatis dalam 7 hari agar kuota GitHub tidak penuh
+
+  # =========================================================
+  # JOB 2: External HTTP API Load Benchmark
+  # =========================================================
+  api-benchmark-test:
+    name: 🌐 External API Load Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 📦 Prepare Root & Benchmark Modules
+        run: |
+          if [ ! -f go.mod ]; then go mod init natabase; fi
+          go mod tidy
+          
+          mkdir -p benchmark && cd benchmark
+          if [ ! -f go.mod ]; then go mod init benchmark; fi
+          go get github.com/valyala/fasthttp
+          go get github.com/HdrHistogram/hdrhistogram-go
+          go mod tidy
+
+      - name: 🔄 Start Natabase API Server Background
+        run: |
+          go run main.go > server.log 2>&1 &
+          echo "Waiting 10 seconds for the server to initialize..."
+          sleep 10
+
+      - name: 🚀 Run External API Benchmark Suite
+        run: |
+          cd benchmark
+          go run . | tee ../api_benchmark_report.log
+
+      - name: 📤 Upload API Benchmark Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-benchmark-artifacts
+          path: |
+            api_benchmark_report.log
+            server.log
+          retention-days: 7
