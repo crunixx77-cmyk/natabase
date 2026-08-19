@@ -38,8 +38,8 @@ jobs:
 
       - name: 🚀 Run Massive Scale Audit & Race Detector
         run: |
-          # Menjalankan script pengujian baru dengan race detector
-          go run -race massive_audit_test.go | tee engine_audit_report.log
+          # Menjalankan script audit dengan race detector (menggunakan massive_audit.go)
+          go run -race massive_audit.go | tee engine_audit_report.log
 
       - name: 📤 Upload Audit Artifacts (Report & CPU Profile)
         if: always()
